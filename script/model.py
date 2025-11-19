@@ -21,3 +21,6 @@ class GCN(nn.Module):
         x = self.sigmoid(x)
         return x.squeeze(), x.squeeze(), x.squeeze()
 
+
+
+
