@@ -1,4 +1,3 @@
-
 import torch
 from torch_geometric.data import Data
 import pandas as pd
@@ -68,7 +67,13 @@ def setup_seed(seed):
 
 setup_seed(0)
 
-dataset_name = 'pheme'
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--dataset_name", type=str, default="pheme")
+args = parser.parse_args()
+
+dataset_name = args.dataset_name
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 train_data = pd.read_csv('dataset/' + dataset_name + '/dataforGCN_train.csv')
@@ -77,19 +82,41 @@ test_data = pd.read_csv('dataset/' + dataset_name + '/dataforGCN_test.csv')
 tweet_embeds = torch.load('dataset/' +dataset_name+ '/TweetEmbeds.pt', map_location=device)
 tweet_graph = torch.load('dataset/' + dataset_name + '/TweetGraph.pt', map_location=device)
 
-psesudo_data = pd.read_csv(f'dataset/{dataset_name}/pheme_analysis_results.csv')
+pseudo_path = f'dataset/{dataset_name}/{dataset_name}_analysis_results.csv'
+if not os.path.exists(pseudo_path):
+    raise FileNotFoundError(f"缺少伪标签文件: {pseudo_path}")
+
+psesudo_data = pd.read_csv(pseudo_path)
+
 psesudo_labels = torch.tensor(psesudo_data["analysis"].tolist(), dtype=torch.long).to(device)
 psesudo_probs = torch.tensor(psesudo_data["prob"].tolist(), dtype=torch.float).to(device)
 
-label_list_train = train_data["label"].tolist()
-label_list_test = test_data["label"].tolist()
+# --- FIX: Twitterillä labelit ovat stringejä, muunnetaan numeroksi ---
+def normalize_labels(labels):
+    label_map = {
+        "fake": 1, "real": 0,
+        "false": 1, "true": 0,
+        "0": 0, "1": 1
+    }
 
-labels = []
-for label_list in [label_list_train, label_list_test]:
-    labels_i = torch.tensor(label_list, dtype=torch.long)
-    labels.append(labels_i)
+    normalized = []
+    for x in labels:
+        s = str(x).lower().strip()
+        if s in label_map:
+            normalized.append(label_map[s])
+        else:
+            # fallback: jos tuntematon → 0
+            normalized.append(0)
+    return normalized
 
-labels = torch.cat(labels, 0)
+label_list_train = normalize_labels(train_data["label"].tolist())
+label_list_test  = normalize_labels(test_data["label"].tolist())
+
+labels_train_tensor = torch.tensor(label_list_train, dtype=torch.long)
+labels_test_tensor  = torch.tensor(label_list_test, dtype=torch.long)
+
+labels = torch.cat([labels_train_tensor, labels_test_tensor], dim=0)
+
 
 data = Data(
     x=tweet_embeds.float(),
@@ -135,8 +162,13 @@ class UniMP(torch.nn.Module):
         return x
 
 data.y = data.y.view(-1)
-model = GCN(num_features + num_classes, num_classes, hidden_channels=64,
-            num_layers=3, heads=2).to(device)
+model = GCN(
+    in_feature=num_features + num_classes,
+    hidden=64,
+    out_feature=num_classes,
+    dropout=0.3
+).to(device)
+
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=0.0005)
 
 train_mask = data.train_mask
@@ -153,7 +185,7 @@ def train(label_rate=0.95):
     train_labels_idx = train_mask_idx[mask]  
     train_unlabeled_idx = train_mask_idx[~mask] 
 
-    # Select top 5% of test samples based on pre-computed probabilities
+    
     num_pseudo = int(len(test_mask_idx) * 0.05)
     topk_indices = torch.topk(psesudo_probs, num_pseudo).indices
 
@@ -168,7 +200,8 @@ def train(label_rate=0.95):
     ).float()
 
     optimizer.zero_grad()
-    out = model(data.x, data.edge_index)
+    out = model(data)
+
     loss = F.cross_entropy(out[train_unlabeled_idx], data.y[train_unlabeled_idx])
     loss.backward()
     optimizer.step()
@@ -183,7 +216,7 @@ def train(label_rate=0.95):
                 torch.cuda.empty_cache()
                 out = out.detach()
                 data.x[unlabel_idx, -num_classes:] = F.softmax(out[unlabel_idx], dim=-1)
-                out = model(data.x, data.edge_index)
+                out = model(data)
 
     return loss.item()
 
@@ -208,10 +241,11 @@ def test():
     unlabel_idx = data.test_mask.nonzero(as_tuple=False).view(-1)
     n_label_iters = 1
     for _ in range(n_label_iters):
-        out = model(data.x, data.edge_index)
+        out = model(data)
+
         data.x[unlabel_idx, -num_classes:] = F.softmax(out[unlabel_idx], dim=-1)
 
-    out = model(data.x, data.edge_index)
+    out = model(data)
     pred = out[test_mask].argmax(dim=-1)
     
     y_true = data.y[test_mask].cpu().numpy()
@@ -234,9 +268,9 @@ best_f1 = 0
 for epoch in range(1, 3001):
     loss = train()
     val_acc, test_acc, precision, recall, f1 = test()
-    # print(f'Epoch: {epoch:03d}, Loss: {loss:.4f}, Val: {val_acc:.4f}, '
-    #     f'Test Acc: {test_acc:.4f}, Precision: {precision:.4f}, '
-    #     f'Recall: {recall:.4f}, F1: {f1:.4f}')
+    print(f'Epoch: {epoch:03d}, Loss: {loss:.4f}, Val: {val_acc:.4f}, '
+    f'Test Acc: {test_acc:.4f}, Precision: {precision:.4f}, '
+    f'Recall: {recall:.4f}, F1: {f1:.4f}')
     
     if test_acc > max_test_acc:
         max_test_acc = test_acc
