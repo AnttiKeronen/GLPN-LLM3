@@ -6,7 +6,7 @@ import time
 import traceback
 
 
-client = OpenAI(api_key="Api key")
+client = OpenAI(api_key="api key")
 
 
 

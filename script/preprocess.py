@@ -10,14 +10,14 @@ def preprocess_dataset(dataset_name):
     print(f"处理数据集: {dataset_name}")
     print(f"目录内容: {os.listdir(base_path)}")
 
-    # 针对不同数据集的文件命名约定
+
     file_mapping = {
         'pheme': {
             'train': f'{dataset_name}_train.csv',
             'test': f'{dataset_name}_test.csv'
         },
         'twitter': {
-            'train': 'train_posts_clean.csv',  # Twitter数据集的特殊命名
+            'train': 'train_posts_clean.csv',  
             'test': 'test_posts.csv'
         },
         'weibo': {

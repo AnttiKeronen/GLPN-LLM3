@@ -37,7 +37,7 @@ def ensure_datasets_ready():
         if not os.path.exists(gcn_train_path):
             print(f"检测到缺少 {gcn_train_path}，执行预处理...")
             try:
-                # 检查数据集结构
+              
                 check_dataset_structure(dataset)
                 # 执行预处理
                 success = preprocess_dataset(dataset)
@@ -178,47 +178,74 @@ test_mask_idx = data.test_mask.nonzero(as_tuple=False).view(-1)
 def train(label_rate=0.95):
     model.train()
 
+    # Clear previous pseudo-labels
     data.x[:, -num_classes:] = 0
 
-    train_mask_idx = train_mask.nonzero(as_tuple=False).view(-1)
-    mask = torch.rand(train_mask_idx.shape[0]) < label_rate
-    train_labels_idx = train_mask_idx[mask]  
-    train_unlabeled_idx = train_mask_idx[~mask] 
+    # Train mask = labeled nodes
+    train_mask_idx = train_mask.nonzero(as_tuple=False).view(-1).long()
 
-    
+    # Random subset becomes "labeled"
+    mask = torch.rand(train_mask_idx.numel()) < label_rate
+    train_labels_idx = train_mask_idx[mask]
+    train_unlabeled_idx = train_mask_idx[~mask]
+
+    # --- SAFETY FIX ---
+    train_unlabeled_idx = train_unlabeled_idx.view(-1).long()
+    train_labels_idx = train_labels_idx.view(-1).long()
+
+    # Prevent empty case
+    if train_unlabeled_idx.numel() == 0:
+        print("WARNING: No unlabeled nodes this epoch. Skipping loss.")
+        return 0.0
+
+    # Select top-k pseudo
     num_pseudo = int(len(test_mask_idx) * 0.05)
     topk_indices = torch.topk(psesudo_probs, num_pseudo).indices
 
     test_psesudo_idx = test_mask_idx[topk_indices]
-    selected_psesudo_labels = psesudo_labels[topk_indices] 
+    selected_psesudo_labels = psesudo_labels[topk_indices]
+
+    # Write labels (one-hot)
     data.x[
-        torch.cat([train_labels_idx, test_psesudo_idx]), 
+        torch.cat([train_labels_idx, test_psesudo_idx]).long(),
         -num_classes:
     ] = F.one_hot(
-        torch.cat([data.y[train_labels_idx], selected_psesudo_labels]), 
+        torch.cat([data.y[train_labels_idx], selected_psesudo_labels]).long(),
         num_classes
     ).float()
 
+    # Forward
     optimizer.zero_grad()
     out = model(data)
 
+    # --- SAFETY: ensure index shape and type ---
+    assert train_unlabeled_idx.dtype == torch.long
+    assert train_unlabeled_idx.dim() == 1
+
+    # Compute loss
     loss = F.cross_entropy(out[train_unlabeled_idx], data.y[train_unlabeled_idx])
     loss.backward()
     optimizer.step()
 
+    # --- Label Refinement ---
     use_labels = True
     n_label_iters = 1
 
     if use_labels and n_label_iters > 0:
-        unlabel_idx = torch.cat([train_unlabeled_idx, data.test_mask.nonzero(as_tuple=False).view(-1)])
-        with torch.no_grad():
-            for _ in range(n_label_iters):
-                torch.cuda.empty_cache()
-                out = out.detach()
-                data.x[unlabel_idx, -num_classes:] = F.softmax(out[unlabel_idx], dim=-1)
-                out = model(data)
+
+        test_idx = data.test_mask.nonzero(as_tuple=False).view(-1).long()
+
+        # Combined unlabeled = unlabeled train + all test
+        unlabel_idx = torch.cat([train_unlabeled_idx, test_idx]).long()
+
+        for _ in range(n_label_iters):
+            with torch.no_grad():
+                pred = model(data).detach()
+                data.x[unlabel_idx, -num_classes:] = F.softmax(pred[unlabel_idx], dim=-1)
 
     return loss.item()
+
+
 
 max_test_acc = 0
 max_precision = 0

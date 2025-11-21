@@ -1,4 +1,4 @@
-# config.py
+#####
 DATASET_CONFIG = {
     'pheme': {
         'train_file': 'dataset/pheme/pheme_train.csv',
